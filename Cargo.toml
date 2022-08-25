@@ -1,0 +1,10 @@
+[package]
+name = "CombineAndConquer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.8.1"
+bevy_prototype_lyon = "0.6.0"
+rand = "0.8.5"
+voronoice = "0.2.0"
