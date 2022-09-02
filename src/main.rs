@@ -40,12 +40,12 @@ struct GameMap {
     rng: ThreadRng,
     width: f64,
     height: f64,
-    sites: Vec<Vec2>,            // point in the middle of each cell
-    types: Vec<CellType>,        // type of each cell
-    vertices: Vec<Vec<Vec2>>,    // vertices of each cell
-    neighbors: Vec<Vec<usize>>,  // neighbors of each cell
-    merged: Vec<bool>,           // whether a given cell has been merged
-    _districts: Vec<Vec<usize>>, // collections of cells to form districts
+    sites: Vec<Vec2>,           // point in the middle of each cell
+    types: Vec<CellType>,       // type of each cell
+    vertices: Vec<Vec<Vec2>>,   // vertices of each cell
+    neighbors: Vec<Vec<usize>>, // neighbors of each cell
+    merged: Vec<bool>,          // whether a given cell has been merged
+    districts: Vec<Vec<usize>>, // collections of cells to form districts
 }
 
 impl GameMap {
@@ -115,7 +115,7 @@ impl GameMap {
             vertices: vertices,
             neighbors: neighbors,
             merged: vec![false; num_cells],
-            _districts: Vec::new(),
+            districts: Vec::new(),
         }
     }
 
