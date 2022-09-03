@@ -28,6 +28,13 @@ fn map_interval(x: f64, l: f64) -> f64 {
     }
 }
 
+// circularly shift a vector so that the element at a given vertex moves to the beginning
+fn circ_shift_vec<T>(v: &mut Vec<T>, i: usize) {
+    let mut v0 = v.split_off(i);
+    v0.append(v);
+    *v = v0;
+}
+
 #[derive(Clone, Copy)]
 enum CellType {
     Empty,         // ignore this cell
@@ -43,8 +50,8 @@ struct GameMap {
     sites: Vec<Vec2>,           // point in the middle of each cell
     types: Vec<CellType>,       // type of each cell
     vertices: Vec<Vec<Vec2>>,   // vertices of each cell
+    normals: Vec<Vec<Vec2>>,    // normals for each vertex in each cell
     neighbors: Vec<Vec<usize>>, // neighbors of each cell
-    merged: Vec<bool>,          // whether a given cell has been merged
     districts: Vec<Vec<usize>>, // collections of cells to form districts
 }
 
@@ -64,21 +71,27 @@ impl GameMap {
         let voronoi = VoronoiBuilder::default()
             .set_sites(rand_sites)
             .set_bounding_box(BoundingBox::new_centered(width, height))
-            .set_lloyd_relaxation_iterations(3)
+            .set_lloyd_relaxation_iterations(4)
             .build()
             .unwrap();
         // extract voronoi cell properties
         let mut sites: Vec<Vec2> = Vec::with_capacity(num_cells);
         let mut types: Vec<CellType> = Vec::with_capacity(num_cells);
         let mut vertices: Vec<Vec<Vec2>> = Vec::with_capacity(num_cells);
+        let mut normals: Vec<Vec<Vec2>> = Vec::with_capacity(num_cells);
         for cell in voronoi.iter_cells() {
-            let mut v: Vec<Vec2> = Vec::with_capacity(cell.iter_vertices().count());
+            let site = cell.site_position();
+            let cell_site = Vec2::new(site.x as f32, site.y as f32);
+            sites.push(cell_site);
+            let mut cell_vertices: Vec<Vec2> = Vec::with_capacity(cell.iter_vertices().count());
+            let mut cell_normals: Vec<Vec2> = Vec::with_capacity(cell.iter_vertices().count());
             for vertex in cell.iter_vertices() {
-                v.push(Vec2::new(vertex.x as f32, vertex.y as f32));
+                let v = Vec2::new(vertex.x as f32, vertex.y as f32);
+                cell_vertices.push(v);
+                cell_normals.push((v - cell_site).normalize());
             }
-            vertices.push(v);
-            let cell_site = cell.site_position();
-            sites.push(Vec2::new(cell_site.x as f32, cell_site.y as f32));
+            vertices.push(cell_vertices);
+            normals.push(cell_normals);
             if cell.is_on_hull() {
                 types.push(CellType::Land);
             } else {
@@ -113,8 +126,8 @@ impl GameMap {
             sites: sites,
             types: types,
             vertices: vertices,
+            normals: normals,
             neighbors: neighbors,
-            merged: vec![false; num_cells],
             districts: Vec::new(),
         }
     }
@@ -275,20 +288,45 @@ impl GameMap {
     }
 
     fn merge_cells(&mut self, i0: usize, i1: usize) -> Result<(), &'static str> {
+        // check that cells are actually neighbors
+        let num_cells = self.num_cells();
+        let mut nb = self.neighbors[i1].clone();
+        if let Some(i0_pos) = nb.iter().position(|&x| x == i0) {
+            nb.remove(i0_pos);
+        } else {
+            return Err("Cannot merge cells because they are not neighbors");
+        }
+        if let Some(i1_pos) = self.neighbors[i0].iter().position(|&x| x == i1) {
+            self.neighbors[i0].remove(i1_pos);
+        } else {
+            return Err("Cannot merge cells because they are not neighbors");
+        }
+        self.neighbors[i0].append(&mut nb);
+        self.neighbors[i1].clear();
+        for i in 0..num_cells {
+            if i != i0 && i != i1 {
+                for ni in self.neighbors[i].iter_mut() {
+                    if *ni == i1 {
+                        *ni = i0;
+                    }
+                }
+            }
+        }
+        // copy vertices and normals
         let mut v0 = self.vertices[i0].clone();
         let mut v1 = self.vertices[i1].clone();
-        // mark second cell as empty
-        self.types[i1] = CellType::Empty;
-        // find first vertex v in common between two cells
-        let mut v = Vec2 {
+        let mut n0 = self.normals[i0].clone();
+        let mut n1 = self.normals[i1].clone();
+        // find a vertex u in common between the two cells
+        let mut u = Vec2 {
             x: std::f32::NAN,
             y: std::f32::NAN,
         };
         let mut found = false;
-        for &a0 in &v0 {
-            for &a1 in &v1 {
-                if a0 == a1 {
-                    v = a0;
+        for &u0 in &v0 {
+            for &u1 in &v1 {
+                if u0 == u1 {
+                    u = u0;
                     found = true;
                     break;
                 }
@@ -300,40 +338,67 @@ impl GameMap {
         if !found {
             return Err("Cannot merge cells because they have no vertices in common.");
         }
-        let mut v_idx0 = v0.iter().position(|&x| x == v).unwrap();
-        let mut v_idx1 = v1.iter().position(|&x| x == v).unwrap();
-        // let w be successor of v in v0 and the predecessor of v in v1
-        let mut w_idx0 = (v_idx0 + v0.len() + 1) % v0.len();
-        let w_idx1 = (v_idx1 + v1.len() - 1) % v1.len();
-        // if w does not match between v0 and v1, then set w to v and set v to its predecessor
-        if v0[w_idx0] != v1[w_idx1] {
-            w_idx0 = v_idx0;
-            // w_idx1 = v_idx1;
-            v_idx0 = (v_idx0 + v0.len() - 1) % v0.len();
-            v_idx1 = (v_idx1 + v1.len() + 1) % v1.len();
-            v = v0[v_idx0];
-            assert!(v == v1[v_idx1]);
+        let mut u0 = v0.iter().position(|&x| x == u).unwrap();
+        let mut u1 = v1.iter().position(|&x| x == u).unwrap();
+        assert!(v0[u0] == v1[u1]);
+        let mut w0 = u0;
+        let mut w1 = u1;
+        // move u as far forward/backward as possible in v0/v1
+        let mut j0 = (u0 + v0.len() - 1) % v0.len();
+        let mut j1 = (u1 + v1.len() + 1) % v1.len();
+        while v0[j0] == v1[j1] {
+            u0 = j0;
+            u1 = j1;
+            j0 = (j0 + v0.len() - 1) % v0.len();
+            j1 = (j1 + v1.len() + 1) % v1.len();
         }
-        // merge polygons
-        let mut v01 = v0.split_off(w_idx0);
-        let mut v11 = v1.split_off(v_idx1);
-        if !v0.is_empty() {
-            v0.pop();
-        } else {
-            v01.pop();
+        assert!(v0[u0] == v1[u1]);
+        u = v0[u0];
+        // move w as far backward/forward as possible in v0/v1
+        j0 = (w0 + v0.len() + 1) % v0.len();
+        j1 = (w1 + v1.len() - 1) % v1.len();
+        while v0[j0] == v1[j1] {
+            w0 = j0;
+            w1 = j1;
+            j0 = (j0 + v0.len() + 1) % v0.len();
+            j1 = (j1 + v1.len() - 1) % v1.len();
         }
-        if !v1.is_empty() {
-            v1.pop();
-        } else {
-            v11.pop();
+        assert!(v0[w0] == v1[w1]);
+        let w = v0[w0];
+        if u == w {
+            return Err("Cannot merge cells because they have only 1 vertex in common");
         }
-        v0.append(&mut v11);
-        v0.append(&mut v1);
-        v0.append(&mut v01);
-        self.vertices[i0] = v0;
+        // circularly shift v0/n0 so that v is index 0 and v1/n1 so that w is index 0
+        circ_shift_vec(&mut v0, u0);
+        assert!(v0[0] == u);
+        circ_shift_vec(&mut n0, u0);
+        circ_shift_vec(&mut v1, w1);
+        assert!(v1[0] == w);
+        circ_shift_vec(&mut n1, w1);
+        w0 = ((w0 + v0.len()) - u0) % v0.len();
+        u1 = ((u1 + v1.len()) - w1) % v1.len();
+        assert!(v0[w0] == w);
+        assert!(v1[u1] == u);
+        // merge cell vertices
+        let mut v01 = v0.split_off(w0);
+        let mut v11 = v1.split_off(u1);
+        assert!(v0.len() > 0);
+        assert!(v1.len() > 0);
+        assert!(v01.len() > 0);
+        assert!(v11.len() > 0);
+        v01.append(&mut v11);
+        self.vertices[i0] = v01;
         self.vertices[i1].clear();
-        self.merged[i0] = true;
-        self.merged[i1] = true;
+        // merge cell normals
+        let mut n01 = n0.split_off(w0);
+        let mut n11 = n1.split_off(u1);
+        n01[0] = ((n01[0] + n1[0]) * 0.5).normalize();
+        n11[0] = ((n11[0] + n0[0]) * 0.5).normalize();
+        n01.append(&mut n11);
+        self.normals[i0] = n01;
+        self.normals[i1].clear();
+        // update types and sites
+        self.types[i1] = CellType::Empty;
         self.sites[i0] = (self.sites[i0] + self.sites[i1]) * 0.5;
         Ok(())
     }
@@ -344,8 +409,7 @@ impl GameMap {
         let num_cells = self.num_cells();
         let mut i0 = self.rng.gen_range(0..num_cells);
         let mut j = 0;
-        while j < num_cells && (self.merged[i0] || !matches!(self.types[i0], CellType::Precinct(_)))
-        {
+        while j < num_cells && !matches!(self.types[i0], CellType::Precinct(_)) {
             i0 = (i0 + 1) % num_cells;
             j += 1;
         }
@@ -357,10 +421,7 @@ impl GameMap {
         let num_neighbors = neighbors.len();
         let mut i1 = self.rng.gen_range(0..num_neighbors);
         j = 0;
-        while j < num_neighbors
-            && (self.merged[neighbors[i1]]
-                || !matches!(self.types[neighbors[i1]], CellType::Precinct(_)))
-        {
+        while j < num_neighbors && !matches!(self.types[neighbors[i1]], CellType::Precinct(_)) {
             i1 = (i1 + 1) % num_neighbors;
             j += 1;
         }
@@ -441,13 +502,13 @@ fn create_map(num_precincts: usize) -> Result<GameMap, &'static str> {
     // manual parameters
     let w = 1280.0;
     let h = 720.0;
-    let num_cells = num_precincts + 28;
+    let num_cells = num_precincts + 30;
 
     // create game map with all interior cells marked as precincts
     let mut game_map = GameMap::new(num_cells, w, h);
 
     // remove some random precincts near the edge
-    let num_remove = game_map.num_precincts() as isize - num_precincts as isize - 1isize;
+    let num_remove = game_map.num_precincts() as isize - num_precincts as isize - 2isize;
     for _ in 0..num_remove {
         game_map.remove_precinct_edge();
     }
@@ -581,7 +642,7 @@ fn setup_system(
 
     // create map
     let mut game_map_result: Result<GameMap, &'static str> = Err("Uninitialized game map");
-    for _ in 0..5 {
+    for _ in 0..1 {
         game_map_result = create_map(num_precincts);
         if let Err(e) = game_map_result {
             println!("Map generation failed: {:?}", e);
@@ -630,7 +691,7 @@ fn setup_system(
             -1 => precinct_opponent_color,
             _ => precinct_neutral_color,
         };
-        spawn_polygon(&mut commands, &precinct_vertices[i], fill_color, 2.0, 4.0);
+        spawn_polygon(&mut commands, &precinct_vertices[i], fill_color, 3.0, 4.0);
         // commands.spawn_bundle(Text2dBundle {
         //     text: Text::from_section(precinct_indices[i].to_string(), text_style.clone())
         //         .with_alignment(TextAlignment::CENTER),
