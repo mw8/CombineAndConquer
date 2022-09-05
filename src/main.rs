@@ -35,6 +35,92 @@ fn circ_shift_vec<T>(v: &mut Vec<T>, i: usize) {
     *v = v0;
 }
 
+// merge vertices and normals for two neighboring cells
+fn merge_cell_vertices_normals(
+    mut v0: Vec<Vec2>,
+    mut v1: Vec<Vec2>,
+    mut n0: Vec<Vec2>,
+    mut n1: Vec<Vec2>,
+) -> Result<(Vec<Vec2>, Vec<Vec2>), &'static str> {
+    // find a vertex u in common between the two cells
+    let mut u = Vec2 {
+        x: std::f32::NAN,
+        y: std::f32::NAN,
+    };
+    let mut found = false;
+    for &u0 in &v0 {
+        for &u1 in &v1 {
+            if u0 == u1 {
+                u = u0;
+                found = true;
+                break;
+            }
+        }
+        if found {
+            break;
+        }
+    }
+    if !found {
+        return Err("Cannot merge cells because they have no vertices in common.");
+    }
+    let mut u0 = v0.iter().position(|&x| x == u).unwrap();
+    let mut u1 = v1.iter().position(|&x| x == u).unwrap();
+    assert!(v0[u0] == v1[u1]);
+    let mut w0 = u0;
+    let mut w1 = u1;
+    // move u as far forward/backward as possible in v0/v1
+    let mut j0 = (u0 + v0.len() - 1) % v0.len();
+    let mut j1 = (u1 + v1.len() + 1) % v1.len();
+    while v0[j0] == v1[j1] {
+        u0 = j0;
+        u1 = j1;
+        j0 = (j0 + v0.len() - 1) % v0.len();
+        j1 = (j1 + v1.len() + 1) % v1.len();
+    }
+    assert!(v0[u0] == v1[u1]);
+    u = v0[u0];
+    // move w as far backward/forward as possible in v0/v1
+    j0 = (w0 + v0.len() + 1) % v0.len();
+    j1 = (w1 + v1.len() - 1) % v1.len();
+    while v0[j0] == v1[j1] {
+        w0 = j0;
+        w1 = j1;
+        j0 = (j0 + v0.len() + 1) % v0.len();
+        j1 = (j1 + v1.len() - 1) % v1.len();
+    }
+    assert!(v0[w0] == v1[w1]);
+    let w = v0[w0];
+    if u == w {
+        return Err("Cannot merge cells because they have only 1 vertex in common");
+    }
+    // circularly shift v0/n0 so that v is index 0 and v1/n1 so that w is index 0
+    circ_shift_vec(&mut v0, u0);
+    assert!(v0[0] == u);
+    circ_shift_vec(&mut n0, u0);
+    circ_shift_vec(&mut v1, w1);
+    assert!(v1[0] == w);
+    circ_shift_vec(&mut n1, w1);
+    w0 = ((w0 + v0.len()) - u0) % v0.len();
+    u1 = ((u1 + v1.len()) - w1) % v1.len();
+    assert!(v0[w0] == w);
+    assert!(v1[u1] == u);
+    // merge cell vertices
+    let mut v01 = v0.split_off(w0);
+    let mut v11 = v1.split_off(u1);
+    assert!(v0.len() > 0);
+    assert!(v1.len() > 0);
+    assert!(v01.len() > 0);
+    assert!(v11.len() > 0);
+    v01.append(&mut v11);
+    // merge cell normals
+    let mut n01 = n0.split_off(w0);
+    let mut n11 = n1.split_off(u1);
+    n01[0] = ((n01[0] + n1[0]) * 0.5).normalize();
+    n11[0] = ((n11[0] + n0[0]) * 0.5).normalize();
+    n01.append(&mut n11);
+    Ok((v01, n01))
+}
+
 #[derive(Clone, Copy)]
 enum CellType {
     Empty,         // ignore this cell
@@ -128,7 +214,8 @@ impl GameMap {
             vertices: vertices,
             normals: normals,
             neighbors: neighbors,
-            districts: Vec::new(),
+            // districts: Vec::new(),
+            districts: vec![vec![10]],
         }
     }
 
@@ -136,6 +223,7 @@ impl GameMap {
     fn num_cells(&self) -> usize {
         self.types.len()
     }
+
     // compute number of cells that are precincts
     fn num_precincts(&self) -> usize {
         self.types
@@ -288,21 +376,24 @@ impl GameMap {
     }
 
     fn merge_cells(&mut self, i0: usize, i1: usize) -> Result<(), &'static str> {
-        // check that cells are actually neighbors
         let num_cells = self.num_cells();
+        // remove i0 from i1 neighbors
         let mut nb = self.neighbors[i1].clone();
         if let Some(i0_pos) = nb.iter().position(|&x| x == i0) {
             nb.remove(i0_pos);
         } else {
             return Err("Cannot merge cells because they are not neighbors");
         }
+        // remove i1 from i0 neighbors
         if let Some(i1_pos) = self.neighbors[i0].iter().position(|&x| x == i1) {
             self.neighbors[i0].remove(i1_pos);
         } else {
             return Err("Cannot merge cells because they are not neighbors");
         }
+        // merge neighbors
         self.neighbors[i0].append(&mut nb);
         self.neighbors[i1].clear();
+        // find all instances of i1 in other neighbor lists and change them to i0
         for i in 0..num_cells {
             if i != i0 && i != i1 {
                 for ni in self.neighbors[i].iter_mut() {
@@ -312,90 +403,16 @@ impl GameMap {
                 }
             }
         }
-        // copy vertices and normals
-        let mut v0 = self.vertices[i0].clone();
-        let mut v1 = self.vertices[i1].clone();
-        let mut n0 = self.normals[i0].clone();
-        let mut n1 = self.normals[i1].clone();
-        // find a vertex u in common between the two cells
-        let mut u = Vec2 {
-            x: std::f32::NAN,
-            y: std::f32::NAN,
-        };
-        let mut found = false;
-        for &u0 in &v0 {
-            for &u1 in &v1 {
-                if u0 == u1 {
-                    u = u0;
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                break;
-            }
-        }
-        if !found {
-            return Err("Cannot merge cells because they have no vertices in common.");
-        }
-        let mut u0 = v0.iter().position(|&x| x == u).unwrap();
-        let mut u1 = v1.iter().position(|&x| x == u).unwrap();
-        assert!(v0[u0] == v1[u1]);
-        let mut w0 = u0;
-        let mut w1 = u1;
-        // move u as far forward/backward as possible in v0/v1
-        let mut j0 = (u0 + v0.len() - 1) % v0.len();
-        let mut j1 = (u1 + v1.len() + 1) % v1.len();
-        while v0[j0] == v1[j1] {
-            u0 = j0;
-            u1 = j1;
-            j0 = (j0 + v0.len() - 1) % v0.len();
-            j1 = (j1 + v1.len() + 1) % v1.len();
-        }
-        assert!(v0[u0] == v1[u1]);
-        u = v0[u0];
-        // move w as far backward/forward as possible in v0/v1
-        j0 = (w0 + v0.len() + 1) % v0.len();
-        j1 = (w1 + v1.len() - 1) % v1.len();
-        while v0[j0] == v1[j1] {
-            w0 = j0;
-            w1 = j1;
-            j0 = (j0 + v0.len() + 1) % v0.len();
-            j1 = (j1 + v1.len() - 1) % v1.len();
-        }
-        assert!(v0[w0] == v1[w1]);
-        let w = v0[w0];
-        if u == w {
-            return Err("Cannot merge cells because they have only 1 vertex in common");
-        }
-        // circularly shift v0/n0 so that v is index 0 and v1/n1 so that w is index 0
-        circ_shift_vec(&mut v0, u0);
-        assert!(v0[0] == u);
-        circ_shift_vec(&mut n0, u0);
-        circ_shift_vec(&mut v1, w1);
-        assert!(v1[0] == w);
-        circ_shift_vec(&mut n1, w1);
-        w0 = ((w0 + v0.len()) - u0) % v0.len();
-        u1 = ((u1 + v1.len()) - w1) % v1.len();
-        assert!(v0[w0] == w);
-        assert!(v1[u1] == u);
-        // merge cell vertices
-        let mut v01 = v0.split_off(w0);
-        let mut v11 = v1.split_off(u1);
-        assert!(v0.len() > 0);
-        assert!(v1.len() > 0);
-        assert!(v01.len() > 0);
-        assert!(v11.len() > 0);
-        v01.append(&mut v11);
-        self.vertices[i0] = v01;
+        // merge vertices and normals
+        let (merged_vertices, merged_normals) = merge_cell_vertices_normals(
+            self.vertices[i0].clone(),
+            self.vertices[i1].clone(),
+            self.normals[i0].clone(),
+            self.normals[i1].clone(),
+        )?;
+        self.vertices[i0] = merged_vertices;
         self.vertices[i1].clear();
-        // merge cell normals
-        let mut n01 = n0.split_off(w0);
-        let mut n11 = n1.split_off(u1);
-        n01[0] = ((n01[0] + n1[0]) * 0.5).normalize();
-        n11[0] = ((n11[0] + n0[0]) * 0.5).normalize();
-        n01.append(&mut n11);
-        self.normals[i0] = n01;
+        self.normals[i0] = merged_normals;
         self.normals[i1].clear();
         // update types and sites
         self.types[i1] = CellType::Empty;
@@ -642,7 +659,7 @@ fn setup_system(
 
     // create map
     let mut game_map_result: Result<GameMap, &'static str> = Err("Uninitialized game map");
-    for _ in 0..1 {
+    for _ in 0..5 {
         game_map_result = create_map(num_precincts);
         if let Err(e) = game_map_result {
             println!("Map generation failed: {:?}", e);
