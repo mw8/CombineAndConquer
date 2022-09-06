@@ -130,7 +130,6 @@ enum CellType {
 }
 
 struct GameMap {
-    rng: ThreadRng,
     width: f64,
     height: f64,
     sites: Vec<Vec2>,           // point in the middle of each cell
@@ -146,7 +145,6 @@ impl GameMap {
     fn new(num_cells: usize, width: f64, height: f64) -> GameMap {
         // random starting sites for cells
         let mut rng = thread_rng();
-        // let mut rng = ChaCha8Rng::seed_from_u64(0);
         let mut rand_sites = Vec::<Point>::with_capacity(num_cells);
         for _ in 0..num_cells {
             let x = map_interval(rng.gen_range(-1.0..1.0), width);
@@ -206,7 +204,6 @@ impl GameMap {
         }
         assert!(neighbors.len() == num_cells);
         GameMap {
-            rng: rng,
             width: width,
             height: height,
             sites: sites,
@@ -214,8 +211,7 @@ impl GameMap {
             vertices: vertices,
             normals: normals,
             neighbors: neighbors,
-            // districts: Vec::new(),
-            districts: vec![vec![10]],
+            districts: Vec::new(),
         }
     }
 
@@ -311,15 +307,15 @@ impl GameMap {
     }
 
     // remove a random precinct near the edge
-    fn remove_precinct_edge(&mut self) {
+    fn remove_precinct_edge(&mut self, rng: &mut ThreadRng) {
         let num_cells = self.num_cells();
-        let mut i0 = self.rng.gen_range(0..num_cells);
+        let mut i0 = rng.gen_range(0..num_cells);
         let mut j0 = 0;
         while j0 < num_cells {
             if matches!(self.types[i0], CellType::Land) {
                 let neighbors = &self.neighbors[i0];
                 let num_neighbors = neighbors.len();
-                let mut i1 = self.rng.gen_range(0..num_neighbors);
+                let mut i1 = rng.gen_range(0..num_neighbors);
                 let mut j1 = 0;
                 while j1 < num_neighbors {
                     if matches!(self.types[neighbors[i1]], CellType::Precinct(_)) {
@@ -421,10 +417,10 @@ impl GameMap {
     }
 
     // combine two random neighboring precincts
-    fn combine_precincts(&mut self) -> Result<(), &'static str> {
+    fn combine_precincts(&mut self, rng: &mut ThreadRng) -> Result<(), &'static str> {
         // find random precinct
         let num_cells = self.num_cells();
-        let mut i0 = self.rng.gen_range(0..num_cells);
+        let mut i0 = rng.gen_range(0..num_cells);
         let mut j = 0;
         while j < num_cells && !matches!(self.types[i0], CellType::Precinct(_)) {
             i0 = (i0 + 1) % num_cells;
@@ -436,7 +432,7 @@ impl GameMap {
         // find a neighboring precinct
         let neighbors = &self.neighbors[i0];
         let num_neighbors = neighbors.len();
-        let mut i1 = self.rng.gen_range(0..num_neighbors);
+        let mut i1 = rng.gen_range(0..num_neighbors);
         j = 0;
         while j < num_neighbors && !matches!(self.types[neighbors[i1]], CellType::Precinct(_)) {
             i1 = (i1 + 1) % num_neighbors;
@@ -519,7 +515,9 @@ fn create_map(num_precincts: usize) -> Result<GameMap, &'static str> {
     // manual parameters
     let w = 1280.0;
     let h = 720.0;
+
     let num_cells = num_precincts + 30;
+    let mut rng = thread_rng();
 
     // create game map with all interior cells marked as precincts
     let mut game_map = GameMap::new(num_cells, w, h);
@@ -527,7 +525,7 @@ fn create_map(num_precincts: usize) -> Result<GameMap, &'static str> {
     // remove some random precincts near the edge
     let num_remove = game_map.num_precincts() as isize - num_precincts as isize - 2isize;
     for _ in 0..num_remove {
-        game_map.remove_precinct_edge();
+        game_map.remove_precinct_edge(&mut rng);
     }
 
     // remove precincts in small connected components
@@ -540,7 +538,7 @@ fn create_map(num_precincts: usize) -> Result<GameMap, &'static str> {
 
     // combine some neighboring precincts to bring the total down to the correct number of precincts
     while game_map.num_precincts() > num_precincts {
-        game_map.combine_precincts()?;
+        game_map.combine_precincts(&mut rng)?;
     }
 
     // randomize precinct vote margins
@@ -557,13 +555,20 @@ fn spawn_polygon(
     commands: &mut Commands,
     vertices: &Vec<Vec2>,
     color: Color,
-    outline_width: f32,
-    z: f32,
+    filled: bool,
+    line_width: f32,
+    x_offset: f32,
+    y_offset: f32,
+    z_offset: f32,
 ) {
-    let draw_mode = if outline_width > 0.0 {
-        DrawMode::Outlined {
-            fill_mode: FillMode::color(color),
-            outline_mode: StrokeMode::new(Color::BLACK, outline_width),
+    let draw_mode = if line_width > 0.0 {
+        if filled {
+            DrawMode::Outlined {
+                fill_mode: FillMode::color(color),
+                outline_mode: StrokeMode::new(Color::BLACK, line_width),
+            }
+        } else {
+            DrawMode::Stroke(StrokeMode::new(color, line_width))
         }
     } else {
         DrawMode::Fill(FillMode::color(color))
@@ -574,25 +579,54 @@ fn spawn_polygon(
             closed: true,
         },
         draw_mode,
-        Transform::from_xyz(0.0, 0.0, z),
+        Transform::from_xyz(x_offset, y_offset, z_offset),
     ));
 }
 
-fn spawn_hills(commands: &mut Commands, vertices: &Vec<Vec2>, color: Color) {
+fn spawn_path(
+    commands: &mut Commands,
+    vertices: &Vec<Vec2>,
+    color: Color,
+    line_width: f32,
+    closed: bool,
+    x_offset: f32,
+    y_offset: f32,
+    z_offset: f32,
+) {
+    let n = vertices.len();
+    if n < 2 {
+        return;
+    }
+    let mut path_builder = PathBuilder::new();
+    path_builder.move_to(vertices[0]);
+    for i in 1..n {
+        path_builder.line_to(vertices[i]);
+    }
+    if closed {
+        path_builder.line_to(vertices[0]);
+    }
+    let path = path_builder.build();
+    commands.spawn_bundle(GeometryBuilder::build_as(
+        &path,
+        DrawMode::Stroke(StrokeMode::new(color, line_width)),
+        Transform::from_xyz(x_offset, y_offset, z_offset),
+    ));
+}
+
+fn spawn_hills(commands: &mut Commands, cell_vertices: &Vec<Vec2>, color: Color) {
     let mut rng = thread_rng();
     let mut center = Vec2::ZERO;
-    for &v in vertices {
+    for &v in cell_vertices {
         center += v;
     }
-    center /= vertices.len() as f32;
-    let draw_mode = DrawMode::Fill(FillMode::color(color));
+    center /= cell_vertices.len() as f32;
     let num_hills = rng.gen_range(0..3);
-    let y_offset = rng.gen_range(-20.0..20.0);
+    let y_offset = rng.gen_range(-20.0..20.0) - 30.0;
     for _ in 0..num_hills {
-        // hill vertices
+        let x_offset = rng.gen_range(-20.0..20.0);
         let w = rng.gen_range(50.0..80.0) as f32;
         let h = rng.gen_range(10.0..20.0) as f32;
-        let v = vec![
+        let hill_vertices = vec![
             Vec2 { x: 0.5 * w, y: 0.0 },
             Vec2 { x: 0.0, y: h },
             Vec2 {
@@ -600,55 +634,78 @@ fn spawn_hills(commands: &mut Commands, vertices: &Vec<Vec2>, color: Color) {
                 y: 0.0,
             },
         ];
-        // hill offset
-        let x_offset = rng.gen_range(-20.0..20.0);
-        commands.spawn_bundle(GeometryBuilder::build_as(
-            &shapes::Polygon {
-                points: v,
-                closed: true,
-            },
-            draw_mode,
-            Transform::from_xyz(center.x + x_offset, center.y + y_offset - 30.0, 2.0),
-        ));
+        spawn_polygon(
+            commands,
+            &hill_vertices,
+            color,
+            true,
+            0.0,
+            center.x + x_offset,
+            center.y + y_offset,
+            2.0,
+        )
     }
 }
 
-fn spawn_waves(commands: &mut Commands, vertices: &Vec<Vec2>, color: Color) {
+fn spawn_waves(commands: &mut Commands, cell_vertices: &Vec<Vec2>, color: Color) {
     let mut rng = thread_rng();
     let mut center = Vec2::ZERO;
-    for &v in vertices {
+    for &v in cell_vertices {
         center += v;
     }
-    center /= vertices.len() as f32;
-    let mut path_builder = PathBuilder::new();
-    path_builder.move_to(Vec2::ZERO);
-    path_builder.line_to(Vec2 { x: 5.0, y: 0.0 });
-    path_builder.line_to(Vec2 { x: 10.0, y: 5.0 });
-    path_builder.line_to(Vec2 { x: 15.0, y: 8.0 });
-    path_builder.line_to(Vec2 { x: 20.0, y: 8.0 });
-    path_builder.line_to(Vec2 { x: 18.0, y: 4.0 });
-    path_builder.line_to(Vec2 { x: 20.0, y: 2.0 });
-    path_builder.line_to(Vec2 { x: 25.0, y: 0.0 });
-    path_builder.line_to(Vec2 { x: 30.0, y: 0.0 });
-    let line = path_builder.build();
-
+    center /= cell_vertices.len() as f32;
+    let wave_vertices = vec![
+        Vec2::ZERO,
+        Vec2 { x: 5.0, y: 0.0 },
+        Vec2 { x: 10.0, y: 5.0 },
+        Vec2 { x: 15.0, y: 8.0 },
+        Vec2 { x: 20.0, y: 8.0 },
+        Vec2 { x: 18.0, y: 4.0 },
+        Vec2 { x: 20.0, y: 2.0 },
+        Vec2 { x: 25.0, y: 0.0 },
+        Vec2 { x: 30.0, y: 0.0 },
+    ];
     let x_offset = rng.gen_range(-20.0..20.0);
     let y_offset = rng.gen_range(-20.0..20.0);
-    commands.spawn_bundle(GeometryBuilder::build_as(
-        &line,
-        DrawMode::Stroke(StrokeMode::new(color, 3.0)),
-        Transform::from_xyz(center.x + x_offset - 15.0, center.y + y_offset, 3.0),
-    ));
+    spawn_path(
+        commands,
+        &wave_vertices,
+        color,
+        3.0,
+        false,
+        center.x + x_offset - 15.0,
+        center.y + y_offset,
+        3.0,
+    );
 }
 
-fn setup_system(
-    mut commands: Commands,
-    // asset_server: Res<AssetServer>,
-    mut exit: EventWriter<bevy::app::AppExit>,
-) {
-    // manual settings
-    let num_precincts = 25;
+fn spawn_districts(commands: &mut Commands, game_map: &GameMap, color: Color) {
+    for district in &game_map.districts {
+        let district_size = district.len();
+        if district_size > 0 {
+            let mut v0 = game_map.vertices[district[0]].clone();
+            let mut n0 = game_map.normals[district[0]].clone();
+            for i in 1..district_size {
+                let v1 = game_map.vertices[district[i]].clone();
+                let n1 = game_map.normals[district[i]].clone();
+                match merge_cell_vertices_normals(v0.clone(), v1, n0.clone(), n1) {
+                    Ok((v2, n2)) => {
+                        v0 = v2;
+                        n0 = n2;
+                    }
+                    Err(e) => println!("District generation failed: {:?}", e),
+                }
+            }
+            for i in 0..v0.len() {
+                v0[i] = v0[i] - 10.0 * n0[i].normalize();
+            }
+            spawn_polygon(commands, &v0, color, false, 12.0, 0.0, 0.0, 5.0);
+        }
+    }
+}
 
+fn spawn_game_map(commands: &mut Commands, num_precincts: usize) -> Result<GameMap, &'static str> {
+    // colors
     let precinct_neutral_color = Color::rgb(0.6, 0.6, 0.6);
     let precinct_player_color = Color::rgb(0.784, 0.937, 0.682);
     let precinct_opponent_color = Color::rgb(0.375, 0.284, 0.371);
@@ -656,7 +713,6 @@ fn setup_system(
     let background_hill_color = Color::rgb(0.63, 0.603, 0.548);
     let background_sea_color = Color::rgb(0.522, 0.624, 0.659);
     let background_wave_color = Color::rgb(0.622, 0.724, 0.759);
-
     // create map
     let mut game_map_result: Result<GameMap, &'static str> = Err("Uninitialized game map");
     for _ in 0..5 {
@@ -667,57 +723,72 @@ fn setup_system(
             break;
         }
     }
-    let game_map = match game_map_result {
-        Ok(x) => x,
-        Err(_) => {
-            exit.send(bevy::app::AppExit);
-            return;
-        }
-    };
-
-    // camera
-    commands.spawn_bundle(Camera2dBundle::default());
-
+    let game_map = game_map_result?;
     // spawn non-precinct background polygons
     let background_land = game_map.land_vertices();
     let background_sea = game_map.sea_vertices();
     for vertices in background_land {
-        spawn_polygon(&mut commands, &vertices, background_land_color, 0.0, 1.0);
-        spawn_hills(&mut commands, &vertices, background_hill_color);
+        spawn_polygon(
+            commands,
+            &vertices,
+            background_land_color,
+            true,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        spawn_hills(commands, &vertices, background_hill_color);
     }
     for vertices in background_sea {
-        spawn_polygon(&mut commands, &vertices, background_sea_color, 0.0, 2.0);
-        spawn_waves(&mut commands, &vertices, background_wave_color);
+        spawn_polygon(
+            commands,
+            &vertices,
+            background_sea_color,
+            true,
+            0.0,
+            0.0,
+            0.0,
+            2.0,
+        );
+        spawn_waves(commands, &vertices, background_wave_color);
     }
-
     // spawn precinct polygons
     let num_precincts = game_map.num_precincts();
     let precinct_vertices = game_map.precinct_vertices();
     let precinct_margins = game_map.precinct_margins();
-    // let precinct_sites = game_map.precinct_sites();
-    // let precinct_indices = game_map.precinct_indices();
-    // let font = asset_server.load("fonts/FiraSans-Bold.ttf");
-    // let text_style = TextStyle {
-    //     font,
-    //     font_size: 60.0,
-    //     color: Color::BLACK,
-    // };
     for i in 0..num_precincts {
         let fill_color = match precinct_margins[i] {
             1 => precinct_player_color,
             -1 => precinct_opponent_color,
             _ => precinct_neutral_color,
         };
-        spawn_polygon(&mut commands, &precinct_vertices[i], fill_color, 3.0, 4.0);
-        // commands.spawn_bundle(Text2dBundle {
-        //     text: Text::from_section(precinct_indices[i].to_string(), text_style.clone())
-        //         .with_alignment(TextAlignment::CENTER),
-        //     transform: Transform::from_xyz(
-        //         precinct_sites[i].x, // - 60.0 / 2.0,
-        //         precinct_sites[i].y, // + 60.0 / 2.0,
-        //         1.0,
-        //     ),
-        //     ..default()
-        // });
+        spawn_polygon(
+            commands,
+            &precinct_vertices[i],
+            fill_color,
+            true,
+            3.0,
+            0.0,
+            0.0,
+            4.0,
+        );
     }
+    // return game map
+    Ok(game_map)
+}
+
+fn setup_system(mut commands: Commands, mut exit: EventWriter<bevy::app::AppExit>) {
+    // camera
+    commands.spawn_bundle(Camera2dBundle::default());
+    // map
+    let game_map = match spawn_game_map(&mut commands, 25) {
+        Ok(x) => x,
+        Err(e) => {
+            println!("{:?}", e);
+            exit.send(bevy::app::AppExit);
+            return;
+        }
+    };
+    commands.insert_resource(game_map);
 }
