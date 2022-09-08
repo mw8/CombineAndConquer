@@ -36,13 +36,8 @@ fn circ_shift_vec<T>(v: &mut Vec<T>, i: usize) {
     *v = v0;
 }
 
-// merge vertices and normals for two neighboring cells
-fn merge_cell_vertices_normals(
-    mut v0: Vec<Vec2>,
-    mut v1: Vec<Vec2>,
-    mut n0: Vec<Vec2>,
-    mut n1: Vec<Vec2>,
-) -> Result<(Vec<Vec2>, Vec<Vec2>), &'static str> {
+// merge vertices for two neighboring cells
+fn merge_cell_vertices(mut v0: Vec<Vec2>, mut v1: Vec<Vec2>) -> Result<Vec<Vec2>, &'static str> {
     // find a vertex u in common between the two cells
     let mut u = Vec2 {
         x: std::f32::NAN,
@@ -97,10 +92,8 @@ fn merge_cell_vertices_normals(
     // circularly shift v0/n0 so that v is index 0 and v1/n1 so that w is index 0
     circ_shift_vec(&mut v0, u0);
     assert!(v0[0] == u);
-    circ_shift_vec(&mut n0, u0);
     circ_shift_vec(&mut v1, w1);
     assert!(v1[0] == w);
-    circ_shift_vec(&mut n1, w1);
     w0 = ((w0 + v0.len()) - u0) % v0.len();
     u1 = ((u1 + v1.len()) - w1) % v1.len();
     assert!(v0[w0] == w);
@@ -113,13 +106,7 @@ fn merge_cell_vertices_normals(
     assert!(v01.len() > 0);
     assert!(v11.len() > 0);
     v01.append(&mut v11);
-    // merge cell normals
-    let mut n01 = n0.split_off(w0);
-    let mut n11 = n1.split_off(u1);
-    n01[0] = ((n01[0] + n1[0]) * 0.5).normalize();
-    n11[0] = ((n11[0] + n0[0]) * 0.5).normalize();
-    n01.append(&mut n11);
-    Ok((v01, n01))
+    Ok(v01)
 }
 
 #[derive(Clone, Copy)]
@@ -136,7 +123,6 @@ struct GameMap {
     sites: Vec<Vec2>,           // point in the middle of each cell
     types: Vec<CellType>,       // type of each cell
     vertices: Vec<Vec<Vec2>>,   // vertices of each cell
-    normals: Vec<Vec<Vec2>>,    // normals for each vertex in each cell
     neighbors: Vec<Vec<usize>>, // neighbors of each cell
     districts: Vec<Vec<usize>>, // collections of cells to form districts
 }
@@ -163,7 +149,6 @@ impl GameMap {
         let mut sites: Vec<Vec2> = Vec::with_capacity(num_cells);
         let mut types: Vec<CellType> = Vec::with_capacity(num_cells);
         let mut vertices: Vec<Vec<Vec2>> = Vec::with_capacity(num_cells);
-        let mut normals: Vec<Vec<Vec2>> = Vec::with_capacity(num_cells);
         for cell in voronoi.iter_cells() {
             let site = cell.site_position();
             let cell_site = Vec2::new(site.x as f32, site.y as f32);
@@ -176,7 +161,6 @@ impl GameMap {
                 cell_normals.push((v - cell_site).normalize());
             }
             vertices.push(cell_vertices);
-            normals.push(cell_normals);
             if cell.is_on_hull() {
                 types.push(CellType::Land);
             } else {
@@ -210,7 +194,6 @@ impl GameMap {
             sites: sites,
             types: types,
             vertices: vertices,
-            normals: normals,
             neighbors: neighbors,
             districts: Vec::new(),
         }
@@ -401,16 +384,10 @@ impl GameMap {
             }
         }
         // merge vertices and normals
-        let (merged_vertices, merged_normals) = merge_cell_vertices_normals(
-            self.vertices[i0].clone(),
-            self.vertices[i1].clone(),
-            self.normals[i0].clone(),
-            self.normals[i1].clone(),
-        )?;
+        let merged_vertices =
+            merge_cell_vertices(self.vertices[i0].clone(), self.vertices[i1].clone())?;
         self.vertices[i0] = merged_vertices;
         self.vertices[i1].clear();
-        self.normals[i0] = merged_normals;
-        self.normals[i1].clear();
         // update types and sites
         self.types[i1] = CellType::Empty;
         self.sites[i0] = (self.sites[i0] + self.sites[i1]) * 0.5;
@@ -685,20 +662,14 @@ fn spawn_districts(commands: &mut Commands, game_map: &GameMap, color: Color) {
         if district_size > 0 {
             // make district vertices
             let mut v0 = game_map.vertices[district[0]].clone();
-            let mut n0 = game_map.normals[district[0]].clone();
             for i in 1..district_size {
                 let v1 = game_map.vertices[district[i]].clone();
-                let n1 = game_map.normals[district[i]].clone();
-                match merge_cell_vertices_normals(v0.clone(), v1, n0.clone(), n1) {
-                    Ok((v2, n2)) => {
+                match merge_cell_vertices(v0.clone(), v1) {
+                    Ok(v2) => {
                         v0 = v2;
-                        n0 = n2;
                     }
                     Err(e) => println!("District generation failed: {:?}", e),
                 }
-            }
-            for i in 0..v0.len() {
-                v0[i] = v0[i] - 10.0 * n0[i].normalize();
             }
             // spawn district polygon
             commands
