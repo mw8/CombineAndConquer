@@ -9,6 +9,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugin(ShapePlugin)
         .add_startup_system(setup_system)
+        .add_system(update_system)
         .run();
 }
 
@@ -555,20 +556,15 @@ fn spawn_polygon(
     commands: &mut Commands,
     vertices: &Vec<Vec2>,
     color: Color,
-    filled: bool,
     line_width: f32,
     x_offset: f32,
     y_offset: f32,
     z_offset: f32,
 ) {
     let draw_mode = if line_width > 0.0 {
-        if filled {
-            DrawMode::Outlined {
-                fill_mode: FillMode::color(color),
-                outline_mode: StrokeMode::new(Color::BLACK, line_width),
-            }
-        } else {
-            DrawMode::Stroke(StrokeMode::new(color, line_width))
+        DrawMode::Outlined {
+            fill_mode: FillMode::color(color),
+            outline_mode: StrokeMode::new(Color::BLACK, line_width),
         }
     } else {
         DrawMode::Fill(FillMode::color(color))
@@ -638,7 +634,6 @@ fn spawn_hills(commands: &mut Commands, cell_vertices: &Vec<Vec2>, color: Color)
             commands,
             &hill_vertices,
             color,
-            true,
             0.0,
             center.x + x_offset,
             center.y + y_offset,
@@ -679,10 +674,16 @@ fn spawn_waves(commands: &mut Commands, cell_vertices: &Vec<Vec2>, color: Color)
     );
 }
 
+#[derive(Component)]
+struct DistrictTag;
+
 fn spawn_districts(commands: &mut Commands, game_map: &GameMap, color: Color) {
+    let line_width = 12.0;
+    let draw_mode = DrawMode::Stroke(StrokeMode::new(color, line_width));
     for district in &game_map.districts {
         let district_size = district.len();
         if district_size > 0 {
+            // make district vertices
             let mut v0 = game_map.vertices[district[0]].clone();
             let mut n0 = game_map.normals[district[0]].clone();
             for i in 1..district_size {
@@ -699,7 +700,17 @@ fn spawn_districts(commands: &mut Commands, game_map: &GameMap, color: Color) {
             for i in 0..v0.len() {
                 v0[i] = v0[i] - 10.0 * n0[i].normalize();
             }
-            spawn_polygon(commands, &v0, color, false, 12.0, 0.0, 0.0, 5.0);
+            // spawn district polygon
+            commands
+                .spawn_bundle(GeometryBuilder::build_as(
+                    &shapes::Polygon {
+                        points: v0,
+                        closed: true,
+                    },
+                    draw_mode,
+                    Transform::default(),
+                ))
+                .insert(DistrictTag);
         }
     }
 }
@@ -732,7 +743,6 @@ fn spawn_game_map(commands: &mut Commands, num_precincts: usize) -> Result<GameM
             commands,
             &vertices,
             background_land_color,
-            true,
             0.0,
             0.0,
             0.0,
@@ -745,7 +755,6 @@ fn spawn_game_map(commands: &mut Commands, num_precincts: usize) -> Result<GameM
             commands,
             &vertices,
             background_sea_color,
-            true,
             0.0,
             0.0,
             0.0,
@@ -767,7 +776,6 @@ fn spawn_game_map(commands: &mut Commands, num_precincts: usize) -> Result<GameM
             commands,
             &precinct_vertices[i],
             fill_color,
-            true,
             3.0,
             0.0,
             0.0,
@@ -791,4 +799,20 @@ fn setup_system(mut commands: Commands, mut exit: EventWriter<bevy::app::AppExit
         }
     };
     commands.insert_resource(game_map);
+}
+
+fn update_system(
+    mut commands: Commands,
+    buttons: Res<Input<MouseButton>>,
+    windows: Res<Windows>,
+    district_query: Query<Entity, With<DistrictTag>>,
+) {
+    let win_size = Vec2::new(1280.0, 720.0);
+    if buttons.just_pressed(MouseButton::Left) {
+        let window = windows.get_primary().unwrap();
+        if let Some(pos_win) = window.cursor_position() {
+            let pos = pos_win - win_size * 0.5;
+            println!("Mouse button pressed at location: {:?}!", pos);
+        }
+    }
 }
