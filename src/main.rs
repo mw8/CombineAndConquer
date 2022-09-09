@@ -430,6 +430,21 @@ impl GameMap {
         }
         Err("Could not find any cell containing those coordinates")
     }
+
+    // check if a cell neighbors a district
+    fn neighbors_district(&self, district_index: usize, cell_index: usize) -> bool {
+        assert!(district_index < self.districts.len());
+        assert!(cell_index < self.num_cells());
+        if self.districts[district_index].contains(&cell_index) {
+            return false;
+        }
+        for &i in &self.districts[district_index] {
+            if self.neighbors[i].contains(&cell_index) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 fn setup_system(mut commands: Commands, mut exit: EventWriter<bevy::app::AppExit>) {
@@ -454,31 +469,43 @@ fn update_system(
     mut game_map: ResMut<GameMap>,
     district_query: Query<Entity, With<DistrictTag>>,
 ) {
+    let district_index = 0usize;
     let win_size = Vec2::new(1280.0, 720.0);
     if buttons.just_pressed(MouseButton::Left) {
         let window = windows.get_primary().unwrap();
         if let Some(pos_win) = window.cursor_position() {
             // compute click position
             let pos = pos_win - win_size * 0.5;
-            println!("Mouse button pressed at location: {:?}!", pos);
             // find cell selected
             match game_map.select_cell(pos) {
-                Ok(idx) => {
-                    if game_map.districts.is_empty() {
+                Ok(cell_index) => {
+                    // check if selected cell is precinct
+                    if !matches!(game_map.types[cell_index], CellType::Precinct(_)) {
+                        return;
+                    }
+                    // check if selected district exists
+                    while game_map.districts.len() <= district_index {
                         game_map.districts.push(Vec::new());
                     }
-                    game_map.districts[0].push(idx);
+                    // check of selected cell neighbors current district
+                    if !game_map.districts[district_index].is_empty()
+                        && !game_map.neighbors_district(district_index, cell_index)
+                    {
+                        return;
+                    }
+                    // add index to currently selected district
+                    game_map.districts[district_index].push(cell_index);
+                    // despawn all current districts
+                    for district_entity in &district_query {
+                        commands.entity(district_entity).despawn();
+                    }
+                    // spawn updated districts
+                    spawn_districts(&mut commands, &game_map, Color::ORANGE);
                 }
                 Err(e) => {
                     println!("Error selecting cell: {:?}", e);
                 }
             }
-            // despawn all current districts
-            for district_entity in &district_query {
-                commands.entity(district_entity).despawn();
-            }
-            // spawn updated districts
-            spawn_districts(&mut commands, &game_map, Color::ORANGE);
         }
     }
 }
