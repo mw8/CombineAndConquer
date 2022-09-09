@@ -13,102 +13,6 @@ fn main() {
         .run();
 }
 
-// push element x onto vector v if x is already not in v
-fn push_if_unique(v: &mut Vec<usize>, x: usize) {
-    if !v.iter().any(|y| *y == x) {
-        v.push(x);
-    }
-}
-
-// map a number between -1 and 1 to an interval of length l centered at zero
-fn map_interval(x: f64, l: f64) -> f64 {
-    if x >= 0.0 {
-        x.powf(0.75) * l * 0.5
-    } else {
-        -(-x).powf(0.75) * l * 0.5
-    }
-}
-
-// circularly shift a vector so that the element at a given vertex moves to the beginning
-fn circ_shift_vec<T>(v: &mut Vec<T>, i: usize) {
-    let mut v0 = v.split_off(i);
-    v0.append(v);
-    *v = v0;
-}
-
-// merge vertices for two neighboring cells
-fn merge_cell_vertices(mut v0: Vec<Vec2>, mut v1: Vec<Vec2>) -> Result<Vec<Vec2>, &'static str> {
-    // find a vertex u in common between the two cells
-    let mut u = Vec2 {
-        x: std::f32::NAN,
-        y: std::f32::NAN,
-    };
-    let mut found = false;
-    for &u0 in &v0 {
-        for &u1 in &v1 {
-            if u0 == u1 {
-                u = u0;
-                found = true;
-                break;
-            }
-        }
-        if found {
-            break;
-        }
-    }
-    if !found {
-        return Err("Cannot merge cells because they have no vertices in common.");
-    }
-    let mut u0 = v0.iter().position(|&x| x == u).unwrap();
-    let mut u1 = v1.iter().position(|&x| x == u).unwrap();
-    assert!(v0[u0] == v1[u1]);
-    let mut w0 = u0;
-    let mut w1 = u1;
-    // move u as far forward/backward as possible in v0/v1
-    let mut j0 = (u0 + v0.len() - 1) % v0.len();
-    let mut j1 = (u1 + v1.len() + 1) % v1.len();
-    while v0[j0] == v1[j1] {
-        u0 = j0;
-        u1 = j1;
-        j0 = (j0 + v0.len() - 1) % v0.len();
-        j1 = (j1 + v1.len() + 1) % v1.len();
-    }
-    assert!(v0[u0] == v1[u1]);
-    u = v0[u0];
-    // move w as far backward/forward as possible in v0/v1
-    j0 = (w0 + v0.len() + 1) % v0.len();
-    j1 = (w1 + v1.len() - 1) % v1.len();
-    while v0[j0] == v1[j1] {
-        w0 = j0;
-        w1 = j1;
-        j0 = (j0 + v0.len() + 1) % v0.len();
-        j1 = (j1 + v1.len() - 1) % v1.len();
-    }
-    assert!(v0[w0] == v1[w1]);
-    let w = v0[w0];
-    if u == w {
-        return Err("Cannot merge cells because they have only 1 vertex in common");
-    }
-    // circularly shift v0/n0 so that v is index 0 and v1/n1 so that w is index 0
-    circ_shift_vec(&mut v0, u0);
-    assert!(v0[0] == u);
-    circ_shift_vec(&mut v1, w1);
-    assert!(v1[0] == w);
-    w0 = ((w0 + v0.len()) - u0) % v0.len();
-    u1 = ((u1 + v1.len()) - w1) % v1.len();
-    assert!(v0[w0] == w);
-    assert!(v1[u1] == u);
-    // merge cell vertices
-    let mut v01 = v0.split_off(w0);
-    let mut v11 = v1.split_off(u1);
-    assert!(v0.len() > 0);
-    assert!(v1.len() > 0);
-    assert!(v01.len() > 0);
-    assert!(v11.len() > 0);
-    v01.append(&mut v11);
-    Ok(v01)
-}
-
 #[derive(Clone, Copy)]
 enum CellType {
     Empty,         // ignore this cell
@@ -120,9 +24,10 @@ enum CellType {
 struct GameMap {
     width: f64,
     height: f64,
-    sites: Vec<Vec2>,           // point in the middle of each cell
     types: Vec<CellType>,       // type of each cell
-    vertices: Vec<Vec<Vec2>>,   // vertices of each cell
+    sites: Vec<Vec2>,           // point near the center of each cell
+    dist2: Vec<f32>, // sq. radius of bounding circle (centered at each site) of each cell
+    vertices: Vec<Vec<Vec2>>, // vertices of each cell
     neighbors: Vec<Vec<usize>>, // neighbors of each cell
     districts: Vec<Vec<usize>>, // collections of cells to form districts
 }
@@ -146,20 +51,25 @@ impl GameMap {
             .build()
             .unwrap();
         // extract voronoi cell properties
-        let mut sites: Vec<Vec2> = Vec::with_capacity(num_cells);
         let mut types: Vec<CellType> = Vec::with_capacity(num_cells);
+        let mut sites: Vec<Vec2> = Vec::with_capacity(num_cells);
+        let mut dist2: Vec<f32> = Vec::with_capacity(num_cells);
         let mut vertices: Vec<Vec<Vec2>> = Vec::with_capacity(num_cells);
         for cell in voronoi.iter_cells() {
             let site = cell.site_position();
             let cell_site = Vec2::new(site.x as f32, site.y as f32);
             sites.push(cell_site);
             let mut cell_vertices: Vec<Vec2> = Vec::with_capacity(cell.iter_vertices().count());
-            let mut cell_normals: Vec<Vec2> = Vec::with_capacity(cell.iter_vertices().count());
+            let mut max_dist2 = 0.0f32;
             for vertex in cell.iter_vertices() {
                 let v = Vec2::new(vertex.x as f32, vertex.y as f32);
+                let d2 = cell_site.distance_squared(v);
+                if max_dist2 < d2 {
+                    max_dist2 = d2;
+                }
                 cell_vertices.push(v);
-                cell_normals.push((v - cell_site).normalize());
             }
+            dist2.push(max_dist2 + 0.1);
             vertices.push(cell_vertices);
             if cell.is_on_hull() {
                 types.push(CellType::Land);
@@ -191,8 +101,9 @@ impl GameMap {
         GameMap {
             width: width,
             height: height,
-            sites: sites,
             types: types,
+            sites: sites,
+            dist2: dist2,
             vertices: vertices,
             neighbors: neighbors,
             districts: Vec::new(),
@@ -487,6 +398,89 @@ impl GameMap {
             }
         }
     }
+
+    // test if a given cell (index i) contains a given point
+    fn within_cell(&self, i: usize, p: Vec2) -> bool {
+        assert!(i < self.num_cells());
+        let n = self.vertices[i].len();
+        for j in 0..n {
+            let v = self.vertices[i][j];
+            let d = self.vertices[i][(j + 1) % n] - v;
+            if d.y * (p.x - v.x) - d.x * (p.y - v.y) < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    // select a cell given some point in the map
+    fn select_cell(&self, p: Vec2) -> Result<usize, &'static str> {
+        if p.x < -0.5 * self.width as f32
+            || p.x > 0.5 * self.width as f32
+            || p.y < -0.5 * self.height as f32
+            || p.y > 0.5 * self.height as f32
+        {
+            return Err("Attempted to select cell with coordinates outside the game map.");
+        }
+        let num_cells = self.num_cells();
+        for i in 0..num_cells {
+            if p.distance_squared(self.sites[i]) < self.dist2[i] && self.within_cell(i, p) {
+                return Ok(i);
+            }
+        }
+        Err("Could not find any cell containing those coordinates")
+    }
+}
+
+fn setup_system(mut commands: Commands, mut exit: EventWriter<bevy::app::AppExit>) {
+    // camera
+    commands.spawn_bundle(Camera2dBundle::default());
+    // map
+    let game_map = match spawn_game_map(&mut commands, 25) {
+        Ok(x) => x,
+        Err(e) => {
+            println!("{:?}", e);
+            exit.send(bevy::app::AppExit);
+            return;
+        }
+    };
+    commands.insert_resource(game_map);
+}
+
+fn update_system(
+    mut commands: Commands,
+    buttons: Res<Input<MouseButton>>,
+    windows: Res<Windows>,
+    mut game_map: ResMut<GameMap>,
+    district_query: Query<Entity, With<DistrictTag>>,
+) {
+    let win_size = Vec2::new(1280.0, 720.0);
+    if buttons.just_pressed(MouseButton::Left) {
+        let window = windows.get_primary().unwrap();
+        if let Some(pos_win) = window.cursor_position() {
+            // compute click position
+            let pos = pos_win - win_size * 0.5;
+            println!("Mouse button pressed at location: {:?}!", pos);
+            // find cell selected
+            match game_map.select_cell(pos) {
+                Ok(idx) => {
+                    if game_map.districts.is_empty() {
+                        game_map.districts.push(Vec::new());
+                    }
+                    game_map.districts[0].push(idx);
+                }
+                Err(e) => {
+                    println!("Error selecting cell: {:?}", e);
+                }
+            }
+            // despawn all current districts
+            for district_entity in &district_query {
+                commands.entity(district_entity).despawn();
+            }
+            // spawn updated districts
+            spawn_districts(&mut commands, &game_map, Color::ORANGE);
+        }
+    }
 }
 
 fn create_map(num_precincts: usize) -> Result<GameMap, &'static str> {
@@ -656,6 +650,7 @@ struct DistrictTag;
 
 fn spawn_districts(commands: &mut Commands, game_map: &GameMap, color: Color) {
     let line_width = 12.0;
+    let line_offset = 8.0;
     let draw_mode = DrawMode::Stroke(StrokeMode::new(color, line_width));
     for district in &game_map.districts {
         let district_size = district.len();
@@ -668,20 +663,33 @@ fn spawn_districts(commands: &mut Commands, game_map: &GameMap, color: Color) {
                     Ok(v2) => {
                         v0 = v2;
                     }
-                    Err(e) => println!("District generation failed: {:?}", e),
+                    Err(e) => {
+                        println!("District generation failed: {:?}", e);
+                        return;
+                    }
                 }
             }
-            // spawn district polygon
-            commands
-                .spawn_bundle(GeometryBuilder::build_as(
-                    &shapes::Polygon {
-                        points: v0,
-                        closed: true,
-                    },
-                    draw_mode,
-                    Transform::default(),
-                ))
-                .insert(DistrictTag);
+            // go through all vertices and move them to the intersection point of
+            // the offset lines going parallel to the vertices of the district
+            match offset_cell_vertices(&v0, line_offset) {
+                Ok(v) => {
+                    // spawn district polygon
+                    commands
+                        .spawn_bundle(GeometryBuilder::build_as(
+                            &shapes::Polygon {
+                                points: v,
+                                closed: true,
+                            },
+                            draw_mode,
+                            Transform::from_xyz(0.0, 0.0, 5.0),
+                        ))
+                        .insert(DistrictTag);
+                }
+                Err(e) => {
+                    println!("District generation failed: {:?}", e);
+                    return;
+                }
+            }
         }
     }
 }
@@ -757,33 +765,130 @@ fn spawn_game_map(commands: &mut Commands, num_precincts: usize) -> Result<GameM
     Ok(game_map)
 }
 
-fn setup_system(mut commands: Commands, mut exit: EventWriter<bevy::app::AppExit>) {
-    // camera
-    commands.spawn_bundle(Camera2dBundle::default());
-    // map
-    let game_map = match spawn_game_map(&mut commands, 25) {
-        Ok(x) => x,
-        Err(e) => {
-            println!("{:?}", e);
-            exit.send(bevy::app::AppExit);
-            return;
-        }
-    };
-    commands.insert_resource(game_map);
+// push element x onto vector v if x is already not in v
+fn push_if_unique(v: &mut Vec<usize>, x: usize) {
+    if !v.iter().any(|y| *y == x) {
+        v.push(x);
+    }
 }
 
-fn update_system(
-    mut commands: Commands,
-    buttons: Res<Input<MouseButton>>,
-    windows: Res<Windows>,
-    district_query: Query<Entity, With<DistrictTag>>,
-) {
-    let win_size = Vec2::new(1280.0, 720.0);
-    if buttons.just_pressed(MouseButton::Left) {
-        let window = windows.get_primary().unwrap();
-        if let Some(pos_win) = window.cursor_position() {
-            let pos = pos_win - win_size * 0.5;
-            println!("Mouse button pressed at location: {:?}!", pos);
+// map a number between -1 and 1 to an interval of length l centered at zero
+fn map_interval(x: f64, l: f64) -> f64 {
+    if x >= 0.0 {
+        x.powf(0.75) * l * 0.5
+    } else {
+        -(-x).powf(0.75) * l * 0.5
+    }
+}
+
+// circularly shift a vector so that the element at a given vertex moves to the beginning
+fn circ_shift_vec<T>(v: &mut Vec<T>, i: usize) {
+    let mut v0 = v.split_off(i);
+    v0.append(v);
+    *v = v0;
+}
+
+// merge vertices for two neighboring cells
+fn merge_cell_vertices(mut v0: Vec<Vec2>, mut v1: Vec<Vec2>) -> Result<Vec<Vec2>, &'static str> {
+    // find a vertex u in common between the two cells
+    let mut u = Vec2 {
+        x: std::f32::NAN,
+        y: std::f32::NAN,
+    };
+    let mut found = false;
+    for &u0 in &v0 {
+        for &u1 in &v1 {
+            if u0 == u1 {
+                u = u0;
+                found = true;
+                break;
+            }
+        }
+        if found {
+            break;
         }
     }
+    if !found {
+        return Err("Cannot merge cells because they have no vertices in common.");
+    }
+    let mut u0 = v0.iter().position(|&x| x == u).unwrap();
+    let mut u1 = v1.iter().position(|&x| x == u).unwrap();
+    assert!(v0[u0] == v1[u1]);
+    let mut w0 = u0;
+    let mut w1 = u1;
+    // move u as far forward/backward as possible in v0/v1
+    let mut j0 = (u0 + v0.len() - 1) % v0.len();
+    let mut j1 = (u1 + v1.len() + 1) % v1.len();
+    while v0[j0] == v1[j1] {
+        u0 = j0;
+        u1 = j1;
+        j0 = (j0 + v0.len() - 1) % v0.len();
+        j1 = (j1 + v1.len() + 1) % v1.len();
+    }
+    assert!(v0[u0] == v1[u1]);
+    u = v0[u0];
+    // move w as far backward/forward as possible in v0/v1
+    j0 = (w0 + v0.len() + 1) % v0.len();
+    j1 = (w1 + v1.len() - 1) % v1.len();
+    while v0[j0] == v1[j1] {
+        w0 = j0;
+        w1 = j1;
+        j0 = (j0 + v0.len() + 1) % v0.len();
+        j1 = (j1 + v1.len() - 1) % v1.len();
+    }
+    assert!(v0[w0] == v1[w1]);
+    let w = v0[w0];
+    if u == w {
+        return Err("Cannot merge cells because they have only 1 vertex in common");
+    }
+    // circularly shift v0/n0 so that v is index 0 and v1/n1 so that w is index 0
+    circ_shift_vec(&mut v0, u0);
+    assert!(v0[0] == u);
+    circ_shift_vec(&mut v1, w1);
+    assert!(v1[0] == w);
+    w0 = ((w0 + v0.len()) - u0) % v0.len();
+    u1 = ((u1 + v1.len()) - w1) % v1.len();
+    assert!(v0[w0] == w);
+    assert!(v1[u1] == u);
+    // merge cell vertices
+    let mut v01 = v0.split_off(w0);
+    let mut v11 = v1.split_off(u1);
+    assert!(v0.len() > 0);
+    assert!(v1.len() > 0);
+    assert!(v01.len() > 0);
+    assert!(v11.len() > 0);
+    v01.append(&mut v11);
+    Ok(v01)
+}
+
+fn offset_cell_vertices(vertices: &Vec<Vec2>, offset: f32) -> Result<Vec<Vec2>, &'static str> {
+    let n = vertices.len();
+    if n < 3 {
+        return Err("Need 3 or more vertices to offset cell.");
+    }
+    let mut w = Vec::new();
+    for i in 0..n {
+        // get current vertex v1 and neighboring vertices v0 and v2
+        let v0 = vertices[(i + n - 1) % n];
+        let v1 = vertices[i];
+        let v2 = vertices[(i + 1) % n];
+        // compute difference vectors between neighboring vertices
+        let d0 = v1 - v0;
+        let d1 = v2 - v1;
+        let p0 = Vec2::new(d0.y, -d0.x).normalize();
+        let p1 = Vec2::new(d1.y, -d1.x).normalize();
+        // solve for
+        let det = d1.x * d0.y - d0.x * d1.y;
+        if (d0.x * d1.y - d1.x * d0.y).abs() < 1e-3 || det.abs() < 1e-3 {
+            continue;
+        }
+        let b0 = d0.x + (p1.x - p0.x) * offset;
+        let b1 = d0.y + (p1.y - p0.y) * offset;
+        let s = (d1.x * b1 - d1.y * b0) / det;
+        w.push(Vec2::new(
+            v0.x + p0.x * offset + d0.x * s,
+            v0.y + p0.y * offset + d0.y * s,
+        ));
+    }
+    Ok(w)
 }
