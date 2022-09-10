@@ -201,8 +201,8 @@ impl GameMap {
         vertices
     }
 
-    // remove a random precinct near the edge
-    fn remove_precinct_edge(&mut self, rng: &mut ThreadRng) {
+    // change a random precinct near the edge to a non-precinct land type
+    fn demote_precinct_edge(&mut self, rng: &mut ThreadRng) {
         let num_cells = self.num_cells();
         let mut i0 = rng.gen_range(0..num_cells);
         let mut j0 = 0;
@@ -226,8 +226,8 @@ impl GameMap {
         }
     }
 
-    // change all connected precinct components smaller than a threshold to not be precincts
-    fn remove_precinct_comp(&mut self, threshold: usize) {
+    // change all connected precinct components smaller than a threshold to be non-precinct land
+    fn demote_precinct_comp(&mut self, threshold: usize) {
         let num_cells = self.num_cells();
         let mut cell_checked = vec![false; num_cells];
         for i in 0..num_cells {
@@ -294,14 +294,23 @@ impl GameMap {
                 }
             }
         }
-        // merge vertices and normals
+        // merge vertices
         let merged_vertices =
             merge_cell_vertices(self.vertices[i0].clone(), self.vertices[i1].clone())?;
         self.vertices[i0] = merged_vertices;
         self.vertices[i1].clear();
-        // update types and sites
+        // update types, sites, dist2
         self.types[i1] = CellType::Empty;
         self.sites[i0] = (self.sites[i0] + self.sites[i1]) * 0.5;
+        let mut max_dist2 = 0.0f32;
+        for &v in &self.vertices[i0] {
+            let d2 = self.sites[i0].distance_squared(v);
+            if max_dist2 < d2 {
+                max_dist2 = d2;
+            }
+        }
+        self.dist2[i0] = max_dist2 + 0.1;
+        self.dist2[i1] = -1.0;
         Ok(())
     }
 
@@ -400,17 +409,22 @@ impl GameMap {
     }
 
     // test if a given cell (index i) contains a given point
-    fn within_cell(&self, i: usize, p: Vec2) -> bool {
+    fn inside_cell(&self, i: usize, p: Vec2) -> bool {
         assert!(i < self.num_cells());
+        let mut inside = false;
         let n = self.vertices[i].len();
         for j in 0..n {
             let v = self.vertices[i][j];
             let d = self.vertices[i][(j + 1) % n] - v;
-            if d.y * (p.x - v.x) - d.x * (p.y - v.y) < 0.0 {
-                return false;
+            if d.y.abs() < 0.001 {
+                continue;
+            }
+            let t = (p.y - v.y) / d.y;
+            if 0.0 <= t && t <= 1.0 && p.x <= v.x + t * d.x {
+                inside = !inside;
             }
         }
-        true
+        inside
     }
 
     // select a cell given some point in the map
@@ -424,7 +438,7 @@ impl GameMap {
         }
         let num_cells = self.num_cells();
         for i in 0..num_cells {
-            if p.distance_squared(self.sites[i]) < self.dist2[i] && self.within_cell(i, p) {
+            if p.distance_squared(self.sites[i]) < self.dist2[i] && self.inside_cell(i, p) {
                 return Ok(i);
             }
         }
@@ -524,11 +538,11 @@ fn create_map(num_precincts: usize) -> Result<GameMap, &'static str> {
     // remove some random precincts near the edge
     let num_remove = game_map.num_precincts() as isize - num_precincts as isize - 2isize;
     for _ in 0..num_remove {
-        game_map.remove_precinct_edge(&mut rng);
+        game_map.demote_precinct_edge(&mut rng);
     }
 
     // remove precincts in small connected components
-    game_map.remove_precinct_comp(num_precincts * 2 / 3);
+    game_map.demote_precinct_comp(num_precincts * 2 / 3);
 
     // make sure there are enough precincts left
     if game_map.num_precincts() < num_precincts {
