@@ -13,6 +13,12 @@ fn main() {
         .run();
 }
 
+// enum GameState {
+//     PlayerTurn,
+//     OpponentTurn,
+//     GameFinished,
+// }
+
 #[derive(Clone, Copy)]
 enum CellType {
     Empty,         // ignore this cell
@@ -24,12 +30,16 @@ enum CellType {
 struct GameMap {
     width: f64,
     height: f64,
-    types: Vec<CellType>,       // type of each cell
-    sites: Vec<Vec2>,           // point near the center of each cell
-    dist2: Vec<f32>, // sq. radius of bounding circle (centered at each site) of each cell
-    vertices: Vec<Vec<Vec2>>, // vertices of each cell
-    neighbors: Vec<Vec<usize>>, // neighbors of each cell
-    districts: Vec<Vec<usize>>, // collections of cells to form districts
+    types: Vec<CellType>,          // type of each cell
+    sites: Vec<Vec2>,              // point near the center of each cell
+    dist2: Vec<f32>,               // sq. radius of bounding circle (around site) of each cell
+    vertices: Vec<Vec<Vec2>>,      // vertices of each cell
+    neighbors: Vec<Vec<usize>>,    // neighbors of each cell
+    districts: Vec<Vec<usize>>,    // collections of cells to form districts
+    district_index: Option<usize>, // currently selected district index
+    num_districts: usize,          // number of total possible districts
+    district_size: usize,          // number of precincts per district
+    district_colors: Vec<Color>,   // color for each district
 }
 
 impl GameMap {
@@ -107,6 +117,10 @@ impl GameMap {
             vertices: vertices,
             neighbors: neighbors,
             districts: Vec::new(),
+            district_index: None,
+            num_districts: 0,
+            district_size: 0,
+            district_colors: Vec::new(),
         }
     }
 
@@ -459,13 +473,67 @@ impl GameMap {
         }
         false
     }
+
+    // randomly perturb all internal edges
+    fn perturb_edges(&mut self) {
+        let mut rng = thread_rng();
+        let num_cells = self.num_cells();
+        for i in 0..num_cells {
+            for &j in &self.neighbors[i] {
+                if i < j
+                    && (matches!(self.types[i], CellType::Precinct(_))
+                        || matches!(self.types[j], CellType::Precinct(_)))
+                {
+                    if let Ok((u0, w0, u1, w1)) =
+                        find_common_edges(&self.vertices[i], &self.vertices[j])
+                    {
+                        // fill v0 with new vertices for cell 0
+                        let mut v0 = Vec::new();
+                        let n0 = self.vertices[i].len();
+                        let mut k = u0;
+                        while k != w0 {
+                            let a0 = self.vertices[i][k];
+                            v0.push(a0);
+                            let a1 = self.vertices[i][(k + 1) % n0];
+                            let d = a1 - a0;
+                            let d_mag = d.length();
+                            if d_mag > 50.0 {
+                                let p = Vec2::new(-d.y, d.x).normalize();
+                                let r0 = rng.gen_range(0.25..0.75);
+                                let r1 = (map_unif_dist_to_tri_dist(rng.gen_range(0.0..1.0)) - 0.5)
+                                    * 0.2;
+                                v0.push(r0 * a0 + (1.0 - r0) * a1 + r1 * d_mag * p);
+                            }
+                            k = (k + 1) % n0;
+                        }
+                        v0.push(self.vertices[i][w0]);
+                        let mut v1 = v0.iter().cloned().rev().collect::<Vec<_>>();
+                        if u0 < w0 {
+                            v0.extend_from_slice(&self.vertices[i][(w0 + 1)..]);
+                            v0.extend_from_slice(&self.vertices[i][..u0]);
+                        } else {
+                            v0.extend_from_slice(&self.vertices[i][(w0 + 1)..u0]);
+                        }
+                        if w1 < u1 {
+                            v1.extend_from_slice(&self.vertices[j][(u1 + 1)..]);
+                            v1.extend_from_slice(&self.vertices[j][..w1]);
+                        } else {
+                            v1.extend_from_slice(&self.vertices[j][(u1 + 1)..w1]);
+                        }
+                        self.vertices[i] = v0;
+                        self.vertices[j] = v1;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn setup_system(mut commands: Commands, mut exit: EventWriter<bevy::app::AppExit>) {
     // camera
     commands.spawn_bundle(Camera2dBundle::default());
     // map
-    let game_map = match spawn_game_map(&mut commands, 25) {
+    let game_map = match spawn_game_map(&mut commands, 25, 5) {
         Ok(x) => x,
         Err(e) => {
             println!("{:?}", e);
@@ -483,38 +551,18 @@ fn update_system(
     mut game_map: ResMut<GameMap>,
     district_query: Query<Entity, With<DistrictTag>>,
 ) {
-    let district_index = 0usize;
+    // get selected precinct
+    let mut precinct_index_option = None;
     let win_size = Vec2::new(1280.0, 720.0);
     if buttons.just_pressed(MouseButton::Left) {
         let window = windows.get_primary().unwrap();
         if let Some(pos_win) = window.cursor_position() {
-            // compute click position
             let pos = pos_win - win_size * 0.5;
-            // find cell selected
             match game_map.select_cell(pos) {
                 Ok(cell_index) => {
-                    // check if selected cell is precinct
-                    if !matches!(game_map.types[cell_index], CellType::Precinct(_)) {
-                        return;
+                    if matches!(game_map.types[cell_index], CellType::Precinct(_)) {
+                        precinct_index_option = Some(cell_index);
                     }
-                    // check if selected district exists
-                    while game_map.districts.len() <= district_index {
-                        game_map.districts.push(Vec::new());
-                    }
-                    // check of selected cell neighbors current district
-                    if !game_map.districts[district_index].is_empty()
-                        && !game_map.neighbors_district(district_index, cell_index)
-                    {
-                        return;
-                    }
-                    // add index to currently selected district
-                    game_map.districts[district_index].push(cell_index);
-                    // despawn all current districts
-                    for district_entity in &district_query {
-                        commands.entity(district_entity).despawn();
-                    }
-                    // spawn updated districts
-                    spawn_districts(&mut commands, &game_map, Color::ORANGE);
                 }
                 Err(e) => {
                     println!("Error selecting cell: {:?}", e);
@@ -522,9 +570,45 @@ fn update_system(
             }
         }
     }
+    // process selected precinct
+    if let Some(precinct_index) = precinct_index_option {
+        // if no district is currently selected, select the first empty district
+        let district_index = match game_map.district_index {
+            Some(x) => x,
+            None => {
+                let mut idx = None;
+                for i in 0..game_map.num_districts {
+                    if game_map.districts[i].is_empty() {
+                        idx = Some(i);
+                        break;
+                    }
+                }
+                game_map.district_index = idx;
+                if idx.is_none() {
+                    return;
+                } else {
+                    idx.unwrap()
+                }
+            }
+        };
+        // check if selected preinct neighbors current district
+        if !game_map.districts[district_index].is_empty()
+            && !game_map.neighbors_district(district_index, precinct_index)
+        {
+            return;
+        }
+        // add selected precinct index to currently selected district
+        game_map.districts[district_index].push(precinct_index);
+        // despawn all current districts
+        for district_entity in &district_query {
+            commands.entity(district_entity).despawn();
+        }
+        // spawn updated districts
+        spawn_districts(&mut commands, &game_map);
+    }
 }
 
-fn create_map(num_precincts: usize) -> Result<GameMap, &'static str> {
+fn create_map(num_precincts: usize, district_colors: Vec<Color>) -> Result<GameMap, &'static str> {
     // manual parameters
     let w = 1280.0;
     let h = 720.0;
@@ -559,6 +643,20 @@ fn create_map(num_precincts: usize) -> Result<GameMap, &'static str> {
 
     // randomize land/sea
     game_map.randomize_others(0.44);
+
+    // perturb edges
+    game_map.perturb_edges();
+
+    // initialize districts
+    assert!(game_map.num_precincts() == num_precincts);
+    let num_districts = district_colors.len();
+    for _ in 0..num_districts {
+        game_map.districts.push(Vec::new());
+    }
+    game_map.num_districts = num_districts;
+    game_map.district_size = num_precincts / num_districts;
+    game_map.district_colors = district_colors;
+    assert!(game_map.num_districts * game_map.district_size == num_precincts);
 
     // return map and unused cells
     Ok(game_map)
@@ -689,11 +787,12 @@ fn spawn_waves(commands: &mut Commands, cell_vertices: &Vec<Vec2>, color: Color)
 #[derive(Component)]
 struct DistrictTag;
 
-fn spawn_districts(commands: &mut Commands, game_map: &GameMap, color: Color) {
+fn spawn_districts(commands: &mut Commands, game_map: &GameMap) {
     let line_width = 12.0;
     let line_offset = 8.0;
-    let draw_mode = DrawMode::Stroke(StrokeMode::new(color, line_width));
-    for district in &game_map.districts {
+    for k in 0..game_map.num_districts {
+        let draw_mode = DrawMode::Stroke(StrokeMode::new(game_map.district_colors[k], line_width));
+        let district = &game_map.districts[k];
         let district_size = district.len();
         if district_size > 0 {
             // make district vertices
@@ -735,7 +834,11 @@ fn spawn_districts(commands: &mut Commands, game_map: &GameMap, color: Color) {
     }
 }
 
-fn spawn_game_map(commands: &mut Commands, num_precincts: usize) -> Result<GameMap, &'static str> {
+fn spawn_game_map(
+    commands: &mut Commands,
+    num_precincts: usize,
+    num_districts: usize,
+) -> Result<GameMap, &'static str> {
     // colors
     let precinct_neutral_color = Color::rgb(0.6, 0.6, 0.6);
     let precinct_player_color = Color::rgb(0.784, 0.937, 0.682);
@@ -744,10 +847,26 @@ fn spawn_game_map(commands: &mut Commands, num_precincts: usize) -> Result<GameM
     let background_hill_color = Color::rgb(0.63, 0.603, 0.548);
     let background_sea_color = Color::rgb(0.522, 0.624, 0.659);
     let background_wave_color = Color::rgb(0.622, 0.724, 0.759);
+    let mut district_colors = vec![
+        Color::RED,
+        Color::ORANGE,
+        Color::YELLOW,
+        Color::GREEN,
+        Color::BLUE,
+        Color::PURPLE,
+        Color::PINK,
+        Color::BEIGE,
+        Color::BLACK,
+        Color::WHITE,
+    ];
+    assert!(num_districts <= 10);
+    for _ in 0..(10 - num_districts) {
+        district_colors.pop();
+    }
     // create map
     let mut game_map_result: Result<GameMap, &'static str> = Err("Uninitialized game map");
     for _ in 0..5 {
-        game_map_result = create_map(num_precincts);
+        game_map_result = create_map(num_precincts, district_colors.clone());
         if let Err(e) = game_map_result {
             println!("Map generation failed: {:?}", e);
         } else {
@@ -822,6 +941,15 @@ fn map_interval(x: f64, l: f64) -> f64 {
     }
 }
 
+// map uniform [0,1] sample to triangular [0,1] sample
+fn map_unif_dist_to_tri_dist(x: f32) -> f32 {
+    if x < 0.5 {
+        (0.5 * x).sqrt()
+    } else {
+        1.0 - (0.5 * (1.0 - x)).sqrt()
+    }
+}
+
 // circularly shift a vector so that the element at a given vertex moves to the beginning
 fn circ_shift_vec<T>(v: &mut Vec<T>, i: usize) {
     let mut v0 = v.split_off(i);
@@ -829,16 +957,20 @@ fn circ_shift_vec<T>(v: &mut Vec<T>, i: usize) {
     *v = v0;
 }
 
-// merge vertices for two neighboring cells
-fn merge_cell_vertices(mut v0: Vec<Vec2>, mut v1: Vec<Vec2>) -> Result<Vec<Vec2>, &'static str> {
+// given two ordered sets (v0 and v1) of anticlockwise ordered vertices of two neighboring cells
+// find the indices u0...w0 in v0 and u1...w1 in v1 that describe the common edges between them
+fn find_common_edges(
+    v0: &Vec<Vec2>,
+    v1: &Vec<Vec2>,
+) -> Result<(usize, usize, usize, usize), &'static str> {
     // find a vertex u in common between the two cells
     let mut u = Vec2 {
         x: std::f32::NAN,
         y: std::f32::NAN,
     };
     let mut found = false;
-    for &u0 in &v0 {
-        for &u1 in &v1 {
+    for &u0 in v0 {
+        for &u1 in v1 {
             if u0 == u1 {
                 u = u0;
                 found = true;
@@ -850,7 +982,7 @@ fn merge_cell_vertices(mut v0: Vec<Vec2>, mut v1: Vec<Vec2>) -> Result<Vec<Vec2>
         }
     }
     if !found {
-        return Err("Cannot merge cells because they have no vertices in common.");
+        return Err("Cells have no vertices in common.");
     }
     let mut u0 = v0.iter().position(|&x| x == u).unwrap();
     let mut u1 = v1.iter().position(|&x| x == u).unwrap();
@@ -880,8 +1012,17 @@ fn merge_cell_vertices(mut v0: Vec<Vec2>, mut v1: Vec<Vec2>) -> Result<Vec<Vec2>
     assert!(v0[w0] == v1[w1]);
     let w = v0[w0];
     if u == w {
-        return Err("Cannot merge cells because they have only 1 vertex in common");
+        return Err("Cells have only 1 vertex in common");
     }
+    Ok((u0, w0, u1, w1))
+}
+
+// merge vertices for two neighboring cells
+fn merge_cell_vertices(mut v0: Vec<Vec2>, mut v1: Vec<Vec2>) -> Result<Vec<Vec2>, &'static str> {
+    // find indices of common edges
+    let (u0, mut w0, mut u1, w1) = find_common_edges(&v0, &v1)?;
+    let u = v0[u0];
+    let w = v0[w0];
     // circularly shift v0/n0 so that v is index 0 and v1/n1 so that w is index 0
     circ_shift_vec(&mut v0, u0);
     assert!(v0[0] == u);
